@@ -11,10 +11,12 @@ import type {
 import {
   CLUSTER_MAX_ZOOM,
   clusterBeaches,
+  clusterMembers,
   clusterColor,
   clusterRadius,
   type Cluster,
 } from "@/lib/cluster";
+import { DIVE_SECONDS, playBurst } from "@/lib/burst";
 import { QUALITY_COLORS, formatBeachName, qualityAt } from "@/lib/quality";
 import type { SeaConditions } from "@/hooks/use-sea-conditions";
 import { visibleShare } from "@/lib/viewport";
@@ -34,6 +36,8 @@ interface BeachMapProps {
   /** Bumped to refit the viewport to `bounds` once frame is off. */
   resetView: number;
   onSelectBeach: (beach: Beach) => void;
+  /** A click on the map itself: not a drag, and not on a beach. */
+  onMapClick: () => void;
   /** Called with the map's extent whenever it settles. */
   onViewportChange: (bounds: Bounds) => void;
   /** Called once the framed selection no longer holds the view. */
@@ -50,6 +54,11 @@ const EUROPE_CENTER: [number, number] = [48, 12];
  */
 const ABANDON_FRACTION = 0.2;
 const UNMONITORED_STROKE = "#898781";
+/** A beach dot's outer radius and its white rim, as the dot reads on screen. */
+const DOT_RADIUS = 6;
+const DOT_BORDER = 1.5;
+const SELECTED_RADIUS = 11;
+const SELECTED_BORDER = 3;
 const USER_LOCATION_PIN_HTML = `
   <svg aria-hidden="true" width="28" height="36" viewBox="0 0 28 36">
     <path d="M14 1.5C7.4 1.5 2 6.9 2 13.5 2 22.1 14 34 14 34s12-11.9 12-20.5C26 6.9 20.6 1.5 14 1.5Z" fill="#1c5cab" stroke="#fff" stroke-width="2.5" stroke-linejoin="round" />
@@ -68,6 +77,7 @@ export function BeachMap({
   seaConditions,
   resetView,
   onSelectBeach,
+  onMapClick,
   onViewportChange,
   onLeaveFrame,
 }: BeachMapProps) {
@@ -75,14 +85,20 @@ export function BeachMap({
   const mapRef = useRef<LeafletMap | null>(null);
   const leafletRef = useRef<typeof import("leaflet") | null>(null);
   const markersByIdRef = useRef<Map<string, CircleMarker>>(new Map());
+  const halosByIdRef = useRef<Map<string, CircleMarker>>(new Map());
+  const haloRendererRef = useRef<Renderer | null>(null);
   const userMarkerRef = useRef<Marker | null>(null);
   const waveMarkerRef = useRef<Marker | null>(null);
   const handledResetRef = useRef(0);
   const selectBeachRef = useRef(onSelectBeach);
   const viewportRef = useRef(onViewportChange);
+  const mapClickRef = useRef(onMapClick);
   const clusterLayerRef = useRef<LayerGroup | null>(null);
   const clusterRendererRef = useRef<Renderer | null>(null);
-  const burstRef = useRef<number | null>(null);
+  const overlayRef = useRef<HTMLCanvasElement | null>(null);
+  const stopBurstRef = useRef<(() => void) | null>(null);
+  const growFrameRef = useRef<number | null>(null);
+  const wasAggregatedRef = useRef(true);
   const framedRef = useRef(false);
   const [mapReady, setMapReady] = useState(false);
   const [zoom, setZoom] = useState(4);
@@ -98,10 +114,15 @@ export function BeachMap({
   }, [onViewportChange]);
 
   useEffect(() => {
+    mapClickRef.current = onMapClick;
+  }, [onMapClick]);
+
+  useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
     let cancelled = false;
     const markersById = markersByIdRef.current;
+    const halosById = halosByIdRef.current;
 
     const initialize = async () => {
       const L = await import("leaflet");
@@ -114,6 +135,9 @@ export function BeachMap({
         minZoom: 3,
         maxZoom: 18,
         preferCanvas: true,
+        // Dots draw their fill without a stroke, so the click target would be
+        // only the fill; a few pixels of slack keep beaches easy to tap.
+        renderer: L.canvas({ tolerance: 3 }),
         zoomControl: true,
       });
 
@@ -140,9 +164,22 @@ export function BeachMap({
         wavePane.style.pointerEvents = "none";
       }
 
+      // White rims for the beach dots, on a canvas of their own under the
+      // fills: drawn with each dot, a rim would cut across any dot beneath it.
+      map.createPane("halos");
+      const haloPane = map.getPane("halos");
+      if (haloPane) {
+        haloPane.style.zIndex = "390";
+        haloPane.style.pointerEvents = "none";
+      }
+      haloRendererRef.current = L.canvas({ pane: "halos" });
+
       clusterRendererRef.current = L.canvas({ pane: "clusters" });
       clusterLayerRef.current = L.layerGroup([], { pane: "clusters" }).addTo(map);
       map.on("zoomend", () => setZoom(map.getZoom()));
+      // Leaflet only fires click when the pointer did not move, so a drag to
+      // pan never counts.
+      map.on("click", () => mapClickRef.current());
 
       // Zooming ends in a moveend too, so one handler covers both; resizing
       // changes what is on screen without either.
@@ -184,10 +221,13 @@ export function BeachMap({
       disconnectResizeObserver?.();
       mapRef.current?.remove();
       mapRef.current = null;
-      if (burstRef.current) cancelAnimationFrame(burstRef.current);
+      stopBurstRef.current?.();
+      if (growFrameRef.current) cancelAnimationFrame(growFrameRef.current);
       clusterLayerRef.current = null;
       clusterRendererRef.current = null;
+      haloRendererRef.current = null;
       markersById.clear();
+      halosById.clear();
       userMarkerRef.current = null;
       waveMarkerRef.current = null;
     };
@@ -200,16 +240,33 @@ export function BeachMap({
     if (!L || !map || !mapReady || beaches.length === 0) return;
 
     const markersById = markersByIdRef.current;
+    const halosById = halosByIdRef.current;
     for (const marker of markersById.values()) marker.remove();
+    for (const halo of halosById.values()) halo.remove();
     markersById.clear();
+    halosById.clear();
+    const haloRenderer = haloRendererRef.current ?? undefined;
 
     for (const beach of beaches) {
+      halosById.set(
+        beach.id,
+        L.circleMarker([beach.lat, beach.lon], {
+          pane: "halos",
+          renderer: haloRenderer,
+          radius: DOT_RADIUS + DOT_BORDER / 2,
+          stroke: false,
+          fillColor: "#ffffff",
+          fillOpacity: 1,
+          interactive: false,
+        }),
+      );
       const marker = L.circleMarker([beach.lat, beach.lon], {
-        radius: 6,
-        color: "#ffffff",
-        weight: 1.5,
-        opacity: 1,
-        fillOpacity: 0.95,
+        radius: DOT_RADIUS - DOT_BORDER / 2,
+        stroke: false,
+        fillOpacity: 1,
+        // A click on a beach opens its card; letting it reach the map too
+        // would close the card in the same breath.
+        bubblingMouseEvents: false,
       });
       marker
         .bindTooltip(formatBeachName(beach.name), {
@@ -280,58 +337,52 @@ export function BeachMap({
     // The pane's canvas covers the whole map, so it swallows clicks and hovers
     // meant for the beach markers underneath it whenever it has nothing drawn.
     const pane = map.getPane("clusters");
-    if (pane) pane.style.pointerEvents = aggregated ? "" : "none";
+    if (pane) {
+      pane.style.pointerEvents = aggregated ? "" : "none";
+      // Back in after a burst faded it out; the stylesheet eases it.
+      if (aggregated) pane.style.opacity = "";
+    }
     if (!aggregated || beaches.length === 0) return;
 
     const renderer = clusterRendererRef.current ?? undefined;
     const clusters = clusterBeaches(beaches, seasonIndex, zoom);
     const largest = Math.max(...clusters.map((cluster) => cluster.total));
 
-    /** Scatters the cluster into its beaches, then dives into them. */
+    /**
+     * Bursts the cluster into its beaches while the camera dives at them, as
+     * one motion. The dive always lands past the clustering zoom, so it ends
+     * on dots rather than on a smaller blob.
+     */
     const burst = (cluster: Cluster, blob: CircleMarker) => {
-      if (burstRef.current) cancelAnimationFrame(burstRef.current);
-      const color = clusterColor(cluster.share);
-      const sparks = cluster.members.map(() =>
-        L.circleMarker([cluster.lat, cluster.lon], {
-          pane: "clusters",
-          renderer,
-          radius: 5,
-          color,
-          weight: 0,
-          fillColor: color,
-          fillOpacity: 1,
-        }).addTo(layer),
+      stopBurstRef.current?.();
+      const extent = L.latLngBounds(cluster.bounds);
+      const target = Math.min(
+        12,
+        Math.max(
+          CLUSTER_MAX_ZOOM,
+          map.getBoundsZoom(extent, false, L.point(120, 120)),
+        ),
       );
-      const radius = blob.getRadius();
-      const started = performance.now();
 
-      const frame = (now: number) => {
-        // Ease out, so the blob leaps apart and settles rather than drifting.
-        const progress = Math.min(1, (now - started) / 520);
-        const eased = 1 - (1 - progress) ** 3;
-        sparks.forEach((spark, index) => {
-          const [lat, lon] = cluster.members[index];
-          spark.setLatLng([
-            cluster.lat + (lat - cluster.lat) * eased,
-            cluster.lon + (lon - cluster.lon) * eased,
-          ]);
-        });
-        blob.setRadius(radius * (1 + 0.9 * eased));
-        blob.setStyle({ fillOpacity: 1 - eased, opacity: 1 - eased });
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+        map.setView(extent.getCenter(), target, { animate: false });
+        return;
+      }
 
-        if (progress < 1) {
-          burstRef.current = requestAnimationFrame(frame);
-          return;
-        }
-        burstRef.current = null;
-        for (const spark of sparks) spark.remove();
-        map.flyToBounds(cluster.bounds, {
-          duration: 0.7,
-          padding: [60, 60],
-          maxZoom: 12,
+      // The other blobs step back while this one opens.
+      if (pane) pane.style.opacity = "0";
+      blob.setStyle({ opacity: 0, fillOpacity: 0 });
+      if (overlayRef.current) {
+        stopBurstRef.current = playBurst({
+          map,
+          canvas: overlayRef.current,
+          cluster,
+          members: clusterMembers(beaches, seasonIndex, zoom, cluster.key),
+          color: clusterColor(cluster.share),
+          radius: blob.getRadius(),
         });
-      };
-      burstRef.current = requestAnimationFrame(frame);
+      }
+      map.flyTo(extent.getCenter(), target, { duration: DIVE_SECONDS });
     };
 
     for (const cluster of clusters) {
@@ -359,16 +410,43 @@ export function BeachMap({
   useEffect(() => {
     const map = mapRef.current;
     const markersById = markersByIdRef.current;
+    const halosById = halosByIdRef.current;
     if (!map || !mapReady || markersById.size === 0) return;
+
+    // Dots only grow in when the map has just left the blobs behind, not on
+    // every season change or selection.
+    const growIn =
+      wasAggregatedRef.current &&
+      !aggregated &&
+      !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    wasAggregatedRef.current = aggregated;
 
     if (aggregated) {
       for (const marker of markersById.values()) marker.remove();
+      for (const halo of halosById.values()) halo.remove();
       return;
     }
 
+    if (growFrameRef.current) cancelAnimationFrame(growFrameRef.current);
+    // Only what is on screen animates; thousands of offscreen dots would just
+    // cost frames.
+    const view = map.getBounds().pad(0.2);
+    // Each entry: a circle and the radius it settles at.
+    const growing: [CircleMarker, number][] = [];
+    const place = (circle: CircleMarker, radius: number, animate: boolean) => {
+      if (animate) {
+        growing.push([circle, radius]);
+        circle.setRadius(0);
+      } else {
+        circle.setRadius(radius);
+      }
+      if (!map.hasLayer(circle)) circle.addTo(map);
+    };
+
     for (const beach of beaches) {
       const marker = markersById.get(beach.id);
-      if (!marker) continue;
+      const halo = halosById.get(beach.id);
+      if (!marker || !halo) continue;
       const quality = qualityAt(beach, seasonIndex);
       const isSelected = beach.id === selectedId;
 
@@ -376,28 +454,54 @@ export function BeachMap({
       // ring so picking it from search never lands on an invisible marker.
       if (!quality && !isSelected) {
         marker.remove();
+        halo.remove();
         continue;
       }
 
-      marker.setStyle(
-        quality
-          ? {
-              color: "#ffffff",
-              weight: isSelected ? 3 : 1.5,
-              fillColor: QUALITY_COLORS[quality],
-              fillOpacity: 0.95,
-            }
-          : {
-              color: UNMONITORED_STROKE,
-              weight: 3,
-              fillColor: UNMONITORED_STROKE,
-              fillOpacity: 0.15,
-            },
-      );
-      marker.setRadius(isSelected ? 11 : 6);
-      if (!map.hasLayer(marker)) marker.addTo(map);
+      const animate = growIn && view.contains(marker.getLatLng());
+      const outer = isSelected ? SELECTED_RADIUS : DOT_RADIUS;
+      const border = isSelected ? SELECTED_BORDER : DOT_BORDER;
+
+      if (quality) {
+        // The fill sits inside the rim; the rim itself lives on the halo
+        // canvas beneath every fill.
+        marker.setStyle({
+          stroke: false,
+          fillColor: QUALITY_COLORS[quality],
+          fillOpacity: 1,
+        });
+        place(marker, outer - border / 2, animate);
+        place(halo, outer + border / 2, animate);
+      } else {
+        // An unassessed selected beach is an outline, so it keeps its own
+        // grey stroke and has no white rim.
+        marker.setStyle({
+          stroke: true,
+          color: UNMONITORED_STROKE,
+          weight: SELECTED_BORDER,
+          opacity: 1,
+          fillColor: UNMONITORED_STROKE,
+          fillOpacity: 0.15,
+        });
+        place(marker, SELECTED_RADIUS, animate);
+        halo.remove();
+      }
       if (isSelected) marker.bringToFront();
     }
+
+    if (growing.length === 0) return;
+    // Land as the burst's sparks fade, overshooting slightly like they do.
+    const started = performance.now();
+    const grow = (now: number) => {
+      const progress = Math.min(1, (now - started) / 260);
+      const scale =
+        1 + 2.70158 * (progress - 1) ** 3 + 1.70158 * (progress - 1) ** 2;
+      for (const [circle, radius] of growing) {
+        circle.setRadius(Math.max(0, radius * scale));
+      }
+      growFrameRef.current = progress < 1 ? requestAnimationFrame(grow) : null;
+    };
+    growFrameRef.current = requestAnimationFrame(grow);
   }, [aggregated, beaches, mapReady, seasonIndex, selectedId]);
 
   /**
@@ -516,6 +620,12 @@ export function BeachMap({
         aria-label="Map of bathing waters"
         className="min-h-0 w-full flex-1"
         ref={containerRef}
+      />
+      {/* Above the map panes, under the controls: where bursts are drawn. */}
+      <canvas
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-0 z-[450] size-full"
+        ref={overlayRef}
       />
       <button
         aria-label="Centre on your location"

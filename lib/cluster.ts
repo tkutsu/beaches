@@ -1,5 +1,5 @@
 import { qualityAt } from "@/lib/quality";
-import type { Beach, Bounds } from "@/lib/types";
+import type { Beach, Bounds, ClassifiedQuality } from "@/lib/types";
 
 /**
  * Zoomed out to a continent, 26,000 dots overplot into a blob where the
@@ -13,8 +13,8 @@ export const CLUSTER_MAX_ZOOM = 7;
 const SPACING_PIXELS = 52;
 const EARTH_RADIUS = 6378137;
 const WORLD_METERS_PER_PIXEL = 156543.03392804097;
-/** Enough flying dots to read as an explosion without animating thousands. */
-const MEMBER_SAMPLE = 36;
+/** A beach inside a cluster: where it is and what it was rated. */
+export type ClusterMember = [lat: number, lon: number, quality: ClassifiedQuality];
 
 export interface Cluster {
   key: string;
@@ -26,8 +26,6 @@ export interface Cluster {
   /** Share of the cluster classified Excellent, 0 to 1. */
   share: number;
   bounds: Bounds;
-  /** A sample of member positions, for the burst animation. */
-  members: [number, number][];
 }
 
 function project(lat: number, lon: number): [number, number] {
@@ -63,7 +61,17 @@ interface Accumulator {
   west: number;
   north: number;
   east: number;
-  members: [number, number][];
+}
+
+/** The hexagonal cell a position falls in at this zoom. */
+function cellKey(lat: number, lon: number, zoom: number): string {
+  const size = (SPACING_PIXELS * WORLD_METERS_PER_PIXEL) / 2 ** zoom;
+  const [x, y] = project(lat, lon);
+  const [q, r] = axialRound(
+    ((Math.sqrt(3) / 3) * x - y / 3) / size,
+    ((2 / 3) * y) / size,
+  );
+  return `${q},${r}`;
 }
 
 /**
@@ -76,18 +84,12 @@ export function clusterBeaches(
   seasonIndex: number,
   zoom: number,
 ): Cluster[] {
-  const size = (SPACING_PIXELS * WORLD_METERS_PER_PIXEL) / 2 ** zoom;
   const cells = new Map<string, Accumulator>();
 
   for (const beach of beaches) {
     const quality = qualityAt(beach, seasonIndex);
     if (!quality) continue;
-    const [x, y] = project(beach.lat, beach.lon);
-    const [q, r] = axialRound(
-      ((Math.sqrt(3) / 3) * x - y / 3) / size,
-      ((2 / 3) * y) / size,
-    );
-    const key = `${q},${r}`;
+    const key = cellKey(beach.lat, beach.lon, zoom);
     let cell = cells.get(key);
     if (!cell) {
       cell = {
@@ -99,7 +101,6 @@ export function clusterBeaches(
         west: beach.lon,
         north: beach.lat,
         east: beach.lon,
-        members: [],
       };
       cells.set(key, cell);
     }
@@ -111,9 +112,6 @@ export function clusterBeaches(
     cell.north = Math.max(cell.north, beach.lat);
     cell.west = Math.min(cell.west, beach.lon);
     cell.east = Math.max(cell.east, beach.lon);
-    if (cell.members.length < MEMBER_SAMPLE) {
-      cell.members.push([beach.lat, beach.lon]);
-    }
   }
 
   return [...cells].map(([key, cell]) => ({
@@ -127,8 +125,28 @@ export function clusterBeaches(
       [cell.south, cell.west],
       [cell.north, cell.east],
     ] as Bounds,
-    members: cell.members,
   }));
+}
+
+/**
+ * Every beach one cluster counted. Worked out only when a cluster is burst,
+ * rather than carried by every cluster on every pass, because the clustering
+ * reruns on each zoom and each step of season playback.
+ */
+export function clusterMembers(
+  beaches: readonly Beach[],
+  seasonIndex: number,
+  zoom: number,
+  key: string,
+): ClusterMember[] {
+  const members: ClusterMember[] = [];
+  for (const beach of beaches) {
+    const quality = qualityAt(beach, seasonIndex);
+    if (quality && cellKey(beach.lat, beach.lon, zoom) === key) {
+      members.push([beach.lat, beach.lon, quality]);
+    }
+  }
+  return members;
 }
 
 /**

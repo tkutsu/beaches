@@ -51,6 +51,7 @@ input:focus-visible {
 
 .cluster-pane {
   opacity: 0.74;
+  transition: opacity 0.3s ease-out;
 }
 
 /* Sunny tiles: a light warm lift, cream land and a bright aqua sea. Only a

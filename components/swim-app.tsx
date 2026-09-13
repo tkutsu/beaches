@@ -122,6 +122,10 @@ export function SwimApp() {
     }
   };
 
+  // Clicking the open map puts the card away, the way clicking outside a
+  // dialog would.
+  const closeBeach = useCallback(() => setSelectedBeach(null), []);
+
   // Stable so the map keeps the one handler it bound on load.
   const trackViewport = useCallback((bounds: Bounds) => {
     setViewBounds(bounds);
@@ -163,6 +167,7 @@ export function SwimApp() {
         seaConditions={sea}
         resetView={resetViewSignal}
         onSelectBeach={(beach) => selectBeach(beach, false)}
+        onMapClick={closeBeach}
         onViewportChange={trackViewport}
         onLeaveFrame={leaveCountry}
       />
