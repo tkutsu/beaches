@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { useSeaConditions } from "@/hooks/use-sea-conditions";
+import type { SeaConditions } from "@/hooks/use-sea-conditions";
 import {
   NO_DATA_LABEL,
   QUALITY_COLORS,
@@ -14,6 +14,7 @@ import type { Beach, ClassifiedQuality } from "@/lib/types";
 interface BeachPanelProps {
   activeSeason: number | undefined;
   beach: Beach;
+  sea: SeaConditions | null;
   seasons: readonly number[];
   onClose: () => void;
   onSelectSeason: (season: number) => void;
@@ -23,12 +24,12 @@ interface BeachPanelProps {
 export function BeachPanel({
   activeSeason,
   beach,
+  sea,
   seasons,
   onClose,
   onSelectSeason,
 }: BeachPanelProps) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
-  const sea = useSeaConditions(beach);
 
   // One entry per season, with unclassified seasons collapsed to null.
   const history = useMemo(

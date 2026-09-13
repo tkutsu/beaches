@@ -8,6 +8,7 @@ import {
   useCatalogIndex,
   useCountryCatalog,
 } from "@/hooks/use-beach-catalog";
+import { useSeaConditions } from "@/hooks/use-sea-conditions";
 import {
   NO_DATA_LABEL,
   QUALITY_COLORS,
@@ -35,6 +36,8 @@ export function SwimApp() {
   const [playing, setPlaying] = useState(false);
   const [rankingOpen, setRankingOpen] = useState(false);
   const [viewBounds, setViewBounds] = useState<Bounds | null>(null);
+  const [resetViewSignal, setResetViewSignal] = useState(0);
+  const sea = useSeaConditions(selectedBeach);
 
   const seasons = useMemo(() => country?.seasons ?? [], [country]);
   const beaches = useMemo(() => country?.beaches ?? [], [country]);
@@ -131,6 +134,12 @@ export function SwimApp() {
     setSeasonIndex(null);
   }, []);
 
+  /** Back to every country, and back to seeing all of them. */
+  const showAllCountries = () => {
+    changeCountry(ALL_COUNTRIES);
+    setResetViewSignal((signal) => signal + 1);
+  };
+
   const changeCountry = (code: string) => {
     // Picking a country is the point of the ranking; get out of the way and
     // let them see the map they just asked for.
@@ -151,6 +160,8 @@ export function SwimApp() {
         focusCenter={focusCenter}
         seasonIndex={activeIndex}
         selectedBeach={selectedBeach}
+        seaConditions={sea}
+        resetView={resetViewSignal}
         onSelectBeach={(beach) => selectBeach(beach, false)}
         onViewportChange={trackViewport}
         onLeaveFrame={leaveCountry}
@@ -258,18 +269,30 @@ export function SwimApp() {
             timelineOpen ? "max-sm:hidden" : ""
           }`}
         >
-          <button
-            aria-expanded={false}
-            className="rounded-full border border-ink/20 bg-paper/95 px-4 py-2 text-xs font-bold tracking-widest uppercase shadow transition hover:bg-paper disabled:text-ink/35"
-            disabled={!index}
-            onClick={() => {
-              setSelectedBeach(null);
-              setRankingOpen(true);
-            }}
-            type="button"
-          >
-            Rankings
-          </button>
+          {countryCode !== ALL_COUNTRIES ? (
+            // While a framed country holds the view there is nothing more the
+            // ranking would add; the way back out is what is missing.
+            <button
+              className="rounded-full border border-ink/20 bg-paper/95 px-4 py-2 text-xs font-bold tracking-widest uppercase shadow transition hover:bg-paper"
+              onClick={showAllCountries}
+              type="button"
+            >
+              Show all countries
+            </button>
+          ) : (
+            <button
+              aria-expanded={false}
+              className="rounded-full border border-ink/20 bg-paper/95 px-4 py-2 text-xs font-bold tracking-widest uppercase shadow transition hover:bg-paper disabled:text-ink/35"
+              disabled={!index}
+              onClick={() => {
+                setSelectedBeach(null);
+                setRankingOpen(true);
+              }}
+              type="button"
+            >
+              Rankings
+            </button>
+          )}
         </div>
       )}
 
@@ -337,6 +360,7 @@ export function SwimApp() {
           <BeachPanel
             activeSeason={activeSeason}
             beach={selectedBeach}
+            sea={sea}
             seasons={seasons}
             onClose={() => setSelectedBeach(null)}
             onSelectSeason={(season) => setSeasonIndex(seasons.indexOf(season))}

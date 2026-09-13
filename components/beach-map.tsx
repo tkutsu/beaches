@@ -16,6 +16,7 @@ import {
   type Cluster,
 } from "@/lib/cluster";
 import { QUALITY_COLORS, formatBeachName, qualityAt } from "@/lib/quality";
+import type { SeaConditions } from "@/hooks/use-sea-conditions";
 import { visibleShare } from "@/lib/viewport";
 import type { Beach, Bounds, Coordinates } from "@/lib/types";
 
@@ -28,6 +29,10 @@ interface BeachMapProps {
   focusCenter: Coordinates | null;
   seasonIndex: number;
   selectedBeach: Beach | null;
+  /** Live swell at the selected beach, for the wave animation. */
+  seaConditions: SeaConditions | null;
+  /** Bumped to refit the viewport to `bounds` once frame is off. */
+  resetView: number;
   onSelectBeach: (beach: Beach) => void;
   /** Called with the map's extent whenever it settles. */
   onViewportChange: (bounds: Bounds) => void;
@@ -60,6 +65,8 @@ export function BeachMap({
   focusCenter,
   seasonIndex,
   selectedBeach,
+  seaConditions,
+  resetView,
   onSelectBeach,
   onViewportChange,
   onLeaveFrame,
@@ -69,6 +76,8 @@ export function BeachMap({
   const leafletRef = useRef<typeof import("leaflet") | null>(null);
   const markersByIdRef = useRef<Map<string, CircleMarker>>(new Map());
   const userMarkerRef = useRef<Marker | null>(null);
+  const waveMarkerRef = useRef<Marker | null>(null);
+  const handledResetRef = useRef(0);
   const selectBeachRef = useRef(onSelectBeach);
   const viewportRef = useRef(onViewportChange);
   const clusterLayerRef = useRef<LayerGroup | null>(null);
@@ -123,6 +132,14 @@ export function BeachMap({
         clusterPane.style.zIndex = "450";
         clusterPane.classList.add("cluster-pane");
       }
+      // Under the beach markers' canvas, so the dot stays on top of its sea.
+      map.createPane("waves");
+      const wavePane = map.getPane("waves");
+      if (wavePane) {
+        wavePane.style.zIndex = "350";
+        wavePane.style.pointerEvents = "none";
+      }
+
       clusterRendererRef.current = L.canvas({ pane: "clusters" });
       clusterLayerRef.current = L.layerGroup([], { pane: "clusters" }).addTo(map);
       map.on("zoomend", () => setZoom(map.getZoom()));
@@ -172,6 +189,7 @@ export function BeachMap({
       clusterRendererRef.current = null;
       markersById.clear();
       userMarkerRef.current = null;
+      waveMarkerRef.current = null;
     };
   }, []);
 
@@ -204,6 +222,52 @@ export function BeachMap({
   }, [beaches, mapReady]);
 
   const aggregated = zoom < CLUSTER_MAX_ZOOM;
+
+  /** Wave fronts rolling in beside the selected beach, sized by the swell. */
+  useEffect(() => {
+    const L = leafletRef.current;
+    const map = mapRef.current;
+    if (!L || !map || !mapReady) return;
+
+    waveMarkerRef.current?.remove();
+    waveMarkerRef.current = null;
+
+    if (!selectedBeach || aggregated) return;
+    const waveHeight = seaConditions?.waveHeight;
+    if (!seaConditions || waveHeight === null || waveHeight === undefined) {
+      return;
+    }
+
+    // The train keeps the swell's own rhythm: one front per real period.
+    const period = Math.min(Math.max(seaConditions.wavePeriod ?? 5, 2), 12);
+    const strength = Math.min(0.25 + waveHeight * 0.45, 0.85);
+    const stroke = (2 + Math.min(waveHeight, 3)).toFixed(1);
+    // The bearing is where the swell comes from and the fronts travel the
+    // opposite way. They travel along +x in the SVG, so bearing+90 lines
+    // compass north up with screen up.
+    const rotation = Math.round((seaConditions.waveDirection ?? 270) + 90);
+
+    const icon = L.divIcon({
+      className: "",
+      iconSize: [96, 96],
+      iconAnchor: [48, 48],
+      html:
+        `<div class="wave-train" style="--wave-period:${period}s;` +
+        `--wave-strength:${strength.toFixed(2)};transform:rotate(${rotation}deg)">` +
+        `<svg viewBox="0 0 96 96" width="96" height="96" fill="none" ` +
+        `stroke="var(--signal)" stroke-width="${stroke}" stroke-linecap="round">` +
+        `<path d="M40 22 Q66 48 40 74"/>` +
+        `<path d="M40 22 Q66 48 40 74"/>` +
+        `<path d="M40 22 Q66 48 40 74"/>` +
+        `</svg></div>`,
+    });
+    waveMarkerRef.current = L.marker([selectedBeach.lat, selectedBeach.lon], {
+      icon,
+      interactive: false,
+      keyboard: false,
+      pane: "waves",
+    }).addTo(map);
+  }, [aggregated, mapReady, seaConditions, selectedBeach]);
 
   /** Gathers beaches into blobs while the whole continent is on screen. */
   useEffect(() => {
@@ -389,6 +453,19 @@ export function BeachMap({
       map.off("zoomend", check);
     };
   }, [bounds, frame, mapReady, onLeaveFrame]);
+
+  /**
+   * Refits to the extent on request — the way back out to every country from
+   * a framed one. It waits for the combined catalogue: until that arrives the
+   * bounds still belong to the country being left.
+   */
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapReady || resetView === handledResetRef.current) return;
+    if (frame || !bounds) return;
+    handledResetRef.current = resetView;
+    map.fitBounds(bounds, { padding: [24, 24] });
+  }, [bounds, frame, mapReady, resetView]);
 
   useEffect(() => {
     if (!focusCenter || !mapRef.current) return;

@@ -8,12 +8,18 @@ export interface SeaConditions {
   temperature: number | null;
   /** Significant wave height in metres, or null when the model has none. */
   waveHeight: number | null;
+  /** Seconds between wave crests, or null when the model has none. */
+  wavePeriod: number | null;
+  /** Bearing the waves come from, degrees, or null when the model has none. */
+  waveDirection: number | null;
 }
 
 interface MarineResponse {
   current?: {
     sea_surface_temperature: number | null;
     wave_height: number | null;
+    wave_period: number | null;
+    wave_direction: number | null;
   };
 }
 
@@ -28,17 +34,17 @@ const readings = new Map<string, SeaConditions>();
  * What the water is doing right now, from Open-Meteo's marine model. The model
  * is an ocean grid: inland waters come back empty, so they are never asked.
  */
-export function useSeaConditions(beach: Beach): SeaConditions | null {
+export function useSeaConditions(beach: Beach | null): SeaConditions | null {
   const [, countArrivals] = useState(0);
 
   useEffect(() => {
-    if (beach.lake || readings.has(beach.id)) return;
+    if (!beach || beach.lake || readings.has(beach.id)) return;
 
     const controller = new AbortController();
     const url = `${MARINE_API}?${new URLSearchParams({
       latitude: String(beach.lat),
       longitude: String(beach.lon),
-      current: "sea_surface_temperature,wave_height",
+      current: "sea_surface_temperature,wave_height,wave_period,wave_direction",
     })}`;
 
     fetch(url, { signal: controller.signal })
@@ -49,9 +55,11 @@ export function useSeaConditions(beach: Beach): SeaConditions | null {
         const reading: SeaConditions = {
           temperature: current.sea_surface_temperature ?? null,
           waveHeight: current.wave_height ?? null,
+          wavePeriod: current.wave_period ?? null,
+          waveDirection: current.wave_direction ?? null,
         };
-        // A beach the grid cannot reach reports both as null; leave the card
-        // as it was rather than giving it an empty line.
+        // A beach the grid cannot reach reports everything as null; leave the
+        // card as it was rather than giving it an empty line.
         if (reading.temperature === null && reading.waveHeight === null) return;
         readings.set(beach.id, reading);
         countArrivals((arrivals) => arrivals + 1);
@@ -60,7 +68,8 @@ export function useSeaConditions(beach: Beach): SeaConditions | null {
       .catch(() => {});
 
     return () => controller.abort();
-  }, [beach.id, beach.lake, beach.lat, beach.lon]);
+  }, [beach]);
 
-  return beach.lake ? null : (readings.get(beach.id) ?? null);
+  if (!beach || beach.lake) return null;
+  return readings.get(beach.id) ?? null;
 }
