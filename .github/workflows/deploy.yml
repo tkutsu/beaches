@@ -1,0 +1,56 @@
+name: Build and deploy
+
+on:
+  push:
+    branches: [main]
+  # Weekly. The EEA publishes a finished season each June, but the current
+  # season's layer fills in through the summer as samples come back, so a
+  # weekly refresh keeps this year honest without hammering them.
+  #
+  # GitHub disables scheduled workflows after 60 days without repo activity;
+  # re-enable from the Actions tab if the map ever goes stale.
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint && pnpm typecheck
+      # Pulls both EEA sources over the committed catalogue, then exports to
+      # out/. A country the EEA cannot serve keeps the data already in the
+      # repo rather than vanishing from the map.
+      - run: pnpm build
+      - uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

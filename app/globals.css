@@ -1,0 +1,122 @@
+@import "tailwindcss";
+@import "leaflet/dist/leaflet.css";
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-ink: var(--ink);
+  --color-signal: var(--signal);
+}
+
+:root {
+  color-scheme: light;
+  --paper: #f4f3ee;
+  --paper-rgb: 244 243 238;
+  --ink: #14211f;
+  --ink-rgb: 20 33 31;
+  --signal: #1c5cab;
+  --signal-rgb: 28 92 171;
+  --surface-rgb: 255 255 255;
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #101715;
+  --paper-rgb: 16 23 21;
+  --ink: #e5ebe8;
+  --ink-rgb: 229 235 232;
+  --signal: #3987e5;
+  --signal-rgb: 57 135 229;
+  --surface-rgb: 40 52 49;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--paper);
+}
+
+body {
+  margin: 0;
+  overflow: hidden;
+  color: var(--ink);
+  background-color: var(--paper);
+  font-family: "Avenir Next", Avenir, "Segoe UI", sans-serif;
+}
+
+button,
+input {
+  font-family: inherit;
+}
+
+button:not(:disabled) {
+  cursor: pointer;
+}
+
+button:focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--signal);
+  outline-offset: 2px;
+}
+
+.cluster-pane {
+  opacity: 0.74;
+}
+
+/* The ranking rises off the bottom edge, the timeline unrolls from its year
+   button. Both are mounted on open, so a keyframe is enough. */
+@keyframes rise-in {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes slide-in-left {
+  from {
+    transform: translateX(-100%);
+    opacity: 0;
+  }
+}
+
+.rise-in {
+  animation: rise-in 240ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.slide-in-left {
+  animation: slide-in-left 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise-in,
+  .slide-in-left {
+    animation: none;
+  }
+}
+
+/* No room for them beside the timeline, and pinching does the same job. */
+@media (max-width: 640px) {
+  .leaflet-control-zoom {
+    display: none;
+  }
+}
+
+[data-theme="dark"] .leaflet-tile-pane {
+  filter: brightness(0.72) invert(1) contrast(0.88) hue-rotate(180deg) saturate(0.7);
+}
+
+[data-theme="dark"] .leaflet-control-attribution {
+  color: rgb(var(--ink-rgb) / 0.7);
+  background: rgb(var(--paper-rgb) / 0.82);
+}
+
+[data-theme="dark"] .leaflet-control-attribution a {
+  color: var(--signal);
+}
+
+[data-theme="dark"] .leaflet-bar a,
+[data-theme="dark"] .leaflet-bar a:hover {
+  border-bottom-color: rgb(var(--ink-rgb) / 0.18);
+  background: var(--paper);
+  color: var(--ink);
+}
