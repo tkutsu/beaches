@@ -18,17 +18,6 @@
   --surface-rgb: 255 255 255;
 }
 
-[data-theme="dark"] {
-  color-scheme: dark;
-  --paper: #101715;
-  --paper-rgb: 16 23 21;
-  --ink: #e5ebe8;
-  --ink-rgb: 229 235 232;
-  --signal: #3987e5;
-  --signal-rgb: 57 135 229;
-  --surface-rgb: 40 52 49;
-}
-
 * {
   box-sizing: border-box;
 }
@@ -62,6 +51,13 @@ input:focus-visible {
 
 .cluster-pane {
   opacity: 0.74;
+}
+
+/* Pastel tiles: pale and airy, so the beach dots carry the colour, while the
+   sea still reads as sea from Europe zoom down to a single beach. */
+.leaflet-tile-pane {
+  filter: saturate(0.6) sepia(0.08) hue-rotate(-8deg) saturate(1.3)
+    brightness(1.12) contrast(0.85);
 }
 
 /* The ranking rises off the bottom edge, the timeline unrolls from its year
@@ -142,24 +138,4 @@ input:focus-visible {
   .leaflet-control-zoom {
     display: none;
   }
-}
-
-[data-theme="dark"] .leaflet-tile-pane {
-  filter: brightness(0.72) invert(1) contrast(0.88) hue-rotate(180deg) saturate(0.7);
-}
-
-[data-theme="dark"] .leaflet-control-attribution {
-  color: rgb(var(--ink-rgb) / 0.7);
-  background: rgb(var(--paper-rgb) / 0.82);
-}
-
-[data-theme="dark"] .leaflet-control-attribution a {
-  color: var(--signal);
-}
-
-[data-theme="dark"] .leaflet-bar a,
-[data-theme="dark"] .leaflet-bar a:hover {
-  border-bottom-color: rgb(var(--ink-rgb) / 0.18);
-  background: var(--paper);
-  color: var(--ink);
 }
