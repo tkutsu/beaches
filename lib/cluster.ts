@@ -150,6 +150,32 @@ export function clusterMembers(
 }
 
 /**
+ * Beaches inside `bounds` that belong to any cluster but `key`: the ones a
+ * burst dives past, which should come into view with the zoom rather than pop
+ * in once it lands.
+ */
+export function clusterNeighbours(
+  beaches: readonly Beach[],
+  seasonIndex: number,
+  zoom: number,
+  key: string,
+  bounds: Bounds,
+): ClusterMember[] {
+  const [[south, west], [north, east]] = bounds;
+  const neighbours: ClusterMember[] = [];
+  for (const beach of beaches) {
+    if (beach.lat < south || beach.lat > north || beach.lon < west || beach.lon > east) {
+      continue;
+    }
+    const quality = qualityAt(beach, seasonIndex);
+    if (quality && cellKey(beach.lat, beach.lon, zoom) !== key) {
+      neighbours.push([beach.lat, beach.lon, quality]);
+    }
+  }
+  return neighbours;
+}
+
+/**
  * Bands share-of-Excellent onto the same status colours the dots use, so a
  * green circle and a green dot carry the same meaning.
  */

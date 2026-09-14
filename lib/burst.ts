@@ -12,17 +12,20 @@ const SPREAD_MS = 560;
 // enough to feel like a queue.
 const STAGGER_MS = 40;
 const HANDOFF_MS = 220;
+/** If the map never reports landing, hand over this long after the dive. */
+const LANDING_GRACE_MS = 400;
 const DOT_RADIUS = 6;
 /** The white rim around each dot, matching the landed markers. */
 const BORDER = 1.5;
 /**
- * The most sparks one burst draws. Every beach in all but the biggest few
- * continental clusters; past that an even sample, so the shape of the coast
- * still comes through without costing a phone its frames.
+ * The most dots one burst draws, for the blob's own beaches and again for the
+ * neighbours. Past that an even sample, so the shape of the coast still comes
+ * through without costing a phone its frames.
  */
-const MAX_SPARKS = 2000;
+const MAX_DOTS = 2000;
 
 const easeOutCubic = (t: number) => 1 - (1 - t) ** 3;
+const clamp01 = (t: number) => Math.min(1, Math.max(0, t));
 
 // Runs about 10% past the target and settles back, so sparks land on their
 // beaches rather than stopping dead.
@@ -37,21 +40,53 @@ interface BurstOptions {
   cluster: Cluster;
   /** The beaches the blob counted, each flown to its own position. */
   members: readonly ClusterMember[];
+  /**
+   * Beaches that will be on screen when the dive lands but belong to other
+   * blobs. They stay where they are and fade in as the camera closes on them.
+   */
+  neighbours: readonly ClusterMember[];
+  /** The zoom the dive ends at, for how far the fade-in has got. */
+  targetZoom: number;
   /** The blob's own colour, for its collapse and the ring it leaves. */
   color: string;
   /** The blob's radius on screen at the moment it was clicked. */
   radius: number;
 }
 
+interface Dot {
+  lat: number;
+  lon: number;
+  color: string;
+  delay: number;
+}
+
+/** Every nth member, so no more than MAX_DOTS are drawn. */
+function sample(members: readonly ClusterMember[], cluster: Cluster): Dot[] {
+  const stride = Math.max(1, Math.ceil(members.length / MAX_DOTS));
+  const dots: Dot[] = [];
+  for (let index = 0; index < members.length; index += stride) {
+    const [lat, lon, quality] = members[index];
+    const angle = Math.atan2(lat - cluster.lat, lon - cluster.lon);
+    dots.push({
+      lat,
+      lon,
+      color: QUALITY_COLORS[quality],
+      delay: ((angle + Math.PI) / (2 * Math.PI)) * STAGGER_MS,
+    });
+  }
+  return dots;
+}
+
 /**
  * Draws a cluster bursting into its beaches while the camera dives at it.
  *
- * Leaflet's canvas layers only redraw once a zoom settles, which is why the
- * burst used to finish before the flight could start. This draws on a canvas
- * pinned over the map instead and projects every spark through the live view
- * on each frame, so the explosion and the zoom are one motion. Each spark is
- * drawn exactly like the dot it flies to, and fades as the real dots grow in
- * underneath, so the burst hands over to the data without a cut.
+ * Leaflet's canvas layers only redraw once a zoom settles, so this draws on a
+ * canvas pinned over the map and projects every dot through the live view on
+ * each frame: the explosion and the zoom are one motion. The blob's beaches
+ * fly out to their places; the beaches around them fade in as the camera
+ * closes. Every dot is drawn exactly like the marker it stands in for, and the
+ * canvas fades once the map has landed and the real markers are underneath,
+ * so the hand-over has no cut.
  *
  * Returns a function that stops the animation and clears the canvas.
  */
@@ -60,6 +95,8 @@ export function playBurst({
   canvas,
   cluster,
   members,
+  neighbours,
+  targetZoom,
   color,
   radius,
 }: BurstOptions): () => void {
@@ -72,31 +109,53 @@ export function playBurst({
   canvas.height = size.y * ratio;
   context.setTransform(ratio, 0, 0, ratio, 0, 0);
 
-  const stride = Math.max(1, Math.ceil(members.length / MAX_SPARKS));
-  // Grouped by colour, so a frame is four fills and four strokes however many
-  // sparks there are, rather than two canvas calls per spark.
-  const byColor = new Map<string, { lat: number; lon: number; delay: number }[]>();
-  for (let index = 0; index < members.length; index += stride) {
-    const [lat, lon, quality] = members[index];
-    const angle = Math.atan2(lat - cluster.lat, lon - cluster.lon);
-    const color = QUALITY_COLORS[quality];
-    const group = byColor.get(color) ?? [];
-    group.push({
-      lat,
-      lon,
-      delay: ((angle + Math.PI) / (2 * Math.PI)) * STAGGER_MS,
-    });
-    byColor.set(color, group);
-  }
+  const sparks = sample(members, cluster);
+  const around = sample(neighbours, cluster);
+  const colors = [...new Set([...sparks, ...around].map((dot) => dot.color))];
+  const startZoom = map.getZoom();
   const landsAt = DIVE_SECONDS * 1000;
-  const endsAt = landsAt + HANDOFF_MS;
   const started = performance.now();
+  let landed = false;
+  let landedAt: number | null = null;
   let frameId = 0;
+
+  // Stamped on the next frame, so the fade runs on the same clock as the
+  // frames drawing it.
+  const onLanded = () => {
+    landed = true;
+  };
+  map.once("zoomend", onLanded);
 
   const clear = () => context.clearRect(0, 0, size.x, size.y);
 
+  /** Screen position and radius for each dot this frame. */
+  const place = (dots: Dot[], travel: (dot: Dot) => number) =>
+    dots.map((dot) => {
+      const progress = travel(dot);
+      const reach = easeOutBack(progress);
+      const point = map.latLngToContainerPoint([
+        cluster.lat + (dot.lat - cluster.lat) * reach,
+        cluster.lon + (dot.lon - cluster.lon) * reach,
+      ]);
+      return {
+        color: dot.color,
+        x: point.x,
+        y: point.y,
+        size: DOT_RADIUS * (0.5 + 0.5 * easeOutCubic(progress)),
+      };
+    });
+
   const draw = (now: number) => {
     const elapsed = now - started;
+    if (landedAt === null && (landed || elapsed > landsAt + LANDING_GRACE_MS)) {
+      landedAt = now;
+    }
+    const handoff = landedAt === null ? 1 : 1 - (now - landedAt) / HANDOFF_MS;
+    if (handoff <= 0) {
+      clear();
+      return;
+    }
+
     clear();
     const origin = map.latLngToContainerPoint([cluster.lat, cluster.lon]);
 
@@ -133,64 +192,57 @@ export function playBurst({
       context.stroke();
     }
 
-    // Sparks travel in map coordinates, so the camera's own motion carries
-    // them across the screen as it dives.
-    const placed: { color: string; x: number; y: number; size: number }[] = [];
-    for (const [color, group] of byColor) {
-      for (const spark of group) {
-        const progress = Math.min(
-          1,
-          Math.max(0, (elapsed - spark.delay) / SPREAD_MS),
-        );
-        const reach = easeOutBack(progress);
-        const point = map.latLngToContainerPoint([
-          cluster.lat + (spark.lat - cluster.lat) * reach,
-          cluster.lon + (spark.lon - cluster.lon) * reach,
-        ]);
-        placed.push({
-          color,
-          x: point.x,
-          y: point.y,
-          size: DOT_RADIUS * (0.5 + 0.5 * easeOutCubic(progress)),
-        });
-      }
-    }
+    // The blob's beaches travel out; the neighbours are already in place and
+    // come up with the zoom, starting a third of the way in.
+    const zoomed = clamp01((map.getZoom() - startZoom) / Math.max(targetZoom - startZoom, 0.01));
+    const layers = [
+      {
+        dots: place(sparks, (dot) => clamp01((elapsed - dot.delay) / SPREAD_MS)),
+        alpha: handoff,
+      },
+      {
+        dots: place(around, () => 1),
+        alpha: easeOutCubic(clamp01((zoomed - 0.33) / 0.67)) * handoff,
+      },
+    ];
 
-    // Every white border goes down before any fill, so where sparks overlap
-    // the colour sits on top and the white only rims the outside, the same
-    // way the landed dots are drawn.
-    context.globalAlpha =
-      elapsed <= landsAt ? 1 : Math.max(0, 1 - (elapsed - landsAt) / HANDOFF_MS);
-    context.fillStyle = "#ffffff";
-    context.beginPath();
-    for (const { x, y, size } of placed) {
-      context.moveTo(x + size + BORDER / 2, y);
-      context.arc(x, y, size + BORDER / 2, 0, Math.PI * 2);
-    }
-    context.fill();
-    for (const color of byColor.keys()) {
-      context.fillStyle = color;
+    // Every white rim goes down before any fill, so where dots overlap the
+    // colour sits on top and the white only rims the outside, the same way
+    // the landed markers are drawn.
+    for (const { dots, alpha } of layers) {
+      if (alpha <= 0) continue;
+      context.globalAlpha = alpha;
+      context.fillStyle = "#ffffff";
       context.beginPath();
-      for (const spark of placed) {
-        if (spark.color !== color) continue;
-        const inner = Math.max(0, spark.size - BORDER / 2);
-        context.moveTo(spark.x + inner, spark.y);
-        context.arc(spark.x, spark.y, inner, 0, Math.PI * 2);
+      for (const { x, y, size: dotSize } of dots) {
+        context.moveTo(x + dotSize + BORDER / 2, y);
+        context.arc(x, y, dotSize + BORDER / 2, 0, Math.PI * 2);
       }
       context.fill();
     }
-    context.globalAlpha = 1;
-
-    if (elapsed < endsAt) {
-      frameId = requestAnimationFrame(draw);
-    } else {
-      clear();
+    for (const { dots, alpha } of layers) {
+      if (alpha <= 0) continue;
+      context.globalAlpha = alpha;
+      for (const dotColor of colors) {
+        context.fillStyle = dotColor;
+        context.beginPath();
+        for (const dot of dots) {
+          if (dot.color !== dotColor) continue;
+          const inner = Math.max(0, dot.size - BORDER / 2);
+          context.moveTo(dot.x + inner, dot.y);
+          context.arc(dot.x, dot.y, inner, 0, Math.PI * 2);
+        }
+        context.fill();
+      }
     }
+    context.globalAlpha = 1;
+    frameId = requestAnimationFrame(draw);
   };
 
   frameId = requestAnimationFrame(draw);
   return () => {
     cancelAnimationFrame(frameId);
+    map.off("zoomend", onLanded);
     clear();
   };
 }

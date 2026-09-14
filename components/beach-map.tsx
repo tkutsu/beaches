@@ -12,6 +12,7 @@ import {
   CLUSTER_MAX_ZOOM,
   clusterBeaches,
   clusterMembers,
+  clusterNeighbours,
   clusterColor,
   clusterRadius,
   type Cluster,
@@ -99,6 +100,7 @@ export function BeachMap({
   const stopBurstRef = useRef<(() => void) | null>(null);
   const growFrameRef = useRef<number | null>(null);
   const wasAggregatedRef = useRef(true);
+  const burstStartedAtRef = useRef(0);
   const framedRef = useRef(false);
   const [mapReady, setMapReady] = useState(false);
   const [zoom, setZoom] = useState(4);
@@ -372,17 +374,31 @@ export function BeachMap({
       // The other blobs step back while this one opens.
       if (pane) pane.style.opacity = "0";
       blob.setStyle({ opacity: 0, fillOpacity: 0 });
+      const centre = extent.getCenter();
       if (overlayRef.current) {
+        // What will be on screen once the dive lands, with a margin.
+        const half = map.getSize().divideBy(2);
+        const middle = map.project(centre, target);
+        const landing = L.latLngBounds(
+          map.unproject(middle.subtract(half), target),
+          map.unproject(middle.add(half), target),
+        ).pad(0.1);
+        burstStartedAtRef.current = performance.now();
         stopBurstRef.current = playBurst({
           map,
           canvas: overlayRef.current,
           cluster,
           members: clusterMembers(beaches, seasonIndex, zoom, cluster.key),
+          neighbours: clusterNeighbours(beaches, seasonIndex, zoom, cluster.key, [
+            [landing.getSouth(), landing.getWest()],
+            [landing.getNorth(), landing.getEast()],
+          ]),
+          targetZoom: target,
           color: clusterColor(cluster.share),
           radius: blob.getRadius(),
         });
       }
-      map.flyTo(extent.getCenter(), target, { duration: DIVE_SECONDS });
+      map.flyTo(centre, target, { duration: DIVE_SECONDS });
     };
 
     for (const cluster of clusters) {
@@ -414,10 +430,14 @@ export function BeachMap({
     if (!map || !mapReady || markersById.size === 0) return;
 
     // Dots only grow in when the map has just left the blobs behind, not on
-    // every season change or selection.
+    // every season change or selection. After a burst they are already on the
+    // burst canvas at full size, so they arrive at full size and the canvas
+    // fades over them instead.
+    const justBurst = performance.now() - burstStartedAtRef.current < 3000;
     const growIn =
       wasAggregatedRef.current &&
       !aggregated &&
+      !justBurst &&
       !window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     wasAggregatedRef.current = aggregated;
 

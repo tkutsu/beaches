@@ -1,7 +1,17 @@
 "use client";
 
+import Image from "next/image";
 import { useMemo, useState } from "react";
+import { useBeachDetails } from "@/hooks/use-beach-details";
 import type { SeaConditions } from "@/hooks/use-sea-conditions";
+import {
+  FACILITY_LABELS,
+  TOURISM_LABELS,
+  commonsPage,
+  commonsThumbnail,
+  depthLabel,
+  formatNights,
+} from "@/lib/details";
 import {
   NO_DATA_LABEL,
   QUALITY_COLORS,
@@ -30,6 +40,19 @@ export function BeachPanel({
   onSelectSeason,
 }: BeachPanelProps) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const [brokenPhoto, setBrokenPhoto] = useState<string | null>(null);
+  const extra = useBeachDetails(beach);
+  const details = extra?.details;
+  const region = extra?.region ?? null;
+  // A file can be deleted from Commons after the sync; then the card simply
+  // goes back to having no photo.
+  const photo = details?.p && details.p[0] !== brokenPhoto ? details.p : null;
+  const facilities = [...(details?.f ?? "")]
+    .map((code) => FACILITY_LABELS[code])
+    .filter(Boolean);
+  const surface = details?.s
+    ? details.s[0].toUpperCase() + details.s.slice(1)
+    : null;
 
   // One entry per season, with unclassified seasons collapsed to null.
   const history = useMemo(
@@ -57,13 +80,37 @@ export function BeachPanel({
   return (
     <section className="pointer-events-auto w-full max-w-xl border border-ink/20 bg-paper/95 p-4 shadow-lg backdrop-blur-sm">
       <div className="flex items-start justify-between gap-3">
-        <div>
+        {photo && (
+          <a
+            className="shrink-0"
+            href={commonsPage(photo[0])}
+            rel="noreferrer"
+            target="_blank"
+            title={`Photo: ${photo[1]}, ${photo[2]}`}
+          >
+            <Image
+              alt=""
+              className="size-16 rounded object-cover"
+              height={64}
+              // The card is on screen the moment it exists; lazy loading only
+              // delays the photo.
+              loading="eager"
+              onError={() => setBrokenPhoto(photo[0])}
+              // 250 is a size Commons keeps ready; others round up to it.
+              src={commonsThumbnail(photo[0], 250)}
+              unoptimized
+              width={64}
+            />
+          </a>
+        )}
+        <div className="min-w-0 flex-1">
           <h2 className="m-0 text-base font-bold">
             {formatBeachName(beach.name)}
           </h2>
           <p className="m-0 mt-0.5 text-xs text-ink/55">
-            {beach.lake ? "Lake" : "Coast"} · {assessedCount} seasons monitored
-            · Excellent in {excellentCount}
+            {beach.lake ? "Lake" : "Coast"}
+            {surface && ` · ${surface}`} · {assessedCount} seasons monitored ·
+            Excellent in {excellentCount}
           </p>
         </div>
         <button
@@ -127,6 +174,39 @@ export function BeachPanel({
         </p>
       )}
 
+      {(region || details?.d != null || facilities.length > 0) && (
+        <ul className="m-0 mt-2 flex list-none flex-wrap gap-1.5 p-0 text-[11px]">
+          {region && (
+            <li
+              className="rounded-full bg-signal/10 px-2 py-0.5 text-signal"
+              title={`${formatNights(region[1])} tourist nights in ${region[0]} in ${region[2]}`}
+            >
+              {TOURISM_LABELS[region[4]]}
+            </li>
+          )}
+          {details?.d != null && (
+            <li
+              className="rounded-full bg-signal/10 px-2 py-0.5 text-signal"
+              title={
+                details.d < 1
+                  ? "Under 1 m deep 500 m out"
+                  : `About ${details.d} m deep 500 m out`
+              }
+            >
+              {depthLabel(details.d)}
+            </li>
+          )}
+          {facilities.map((label) => (
+            <li
+              className="rounded-full bg-ink/6 px-2 py-0.5 text-ink/70"
+              key={label}
+            >
+              {label}
+            </li>
+          ))}
+        </ul>
+      )}
+
       <div className="mt-3" onMouseLeave={() => setHoveredIndex(null)}>
         <div
           className="flex gap-[2px]"
@@ -174,14 +254,30 @@ export function BeachPanel({
         </div>
       </div>
 
-      <a
-        className="mt-3 inline-block text-xs font-semibold text-signal"
-        href={`https://www.google.com/maps/search/?api=1&query=${beach.lat},${beach.lon}`}
-        rel="noreferrer"
-        target="_blank"
-      >
-        Open in maps ↗
-      </a>
+      <div className="mt-3 flex items-baseline justify-between gap-3">
+        <a
+          className="shrink-0 text-xs font-semibold text-signal"
+          href={`https://www.google.com/maps/search/?api=1&query=${beach.lat},${beach.lon}`}
+          rel="noreferrer"
+          target="_blank"
+        >
+          Open in maps ↗
+        </a>
+        {details && (
+          // Commons licences ask for the author and licence; the rest is
+          // OpenStreetMap and Eurostat.
+          <p className="m-0 min-w-0 truncate text-right text-[10px] text-ink/40">
+            {[
+              photo && `Photo: ${photo[1]}, ${photo[2]}`,
+              (details.s || details.f) && "OpenStreetMap",
+              region && "Eurostat",
+              details.d != null && "EMODnet",
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </p>
+        )}
+      </div>
     </section>
   );
 }
