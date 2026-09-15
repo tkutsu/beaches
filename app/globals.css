@@ -18,6 +18,17 @@
   --surface-rgb: 255 255 255;
 }
 
+[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #101715;
+  --paper-rgb: 16 23 21;
+  --ink: #e5ebe8;
+  --ink-rgb: 229 235 232;
+  --signal: #3987e5;
+  --signal-rgb: 57 135 229;
+  --surface-rgb: 40 52 49;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -56,7 +67,7 @@ input:focus-visible {
 
 /* Sunny tiles: a light warm lift, cream land and a bright aqua sea. Only a
    touch of sepia, re-saturated, because more of it turns the sea beige. */
-.leaflet-tile-pane {
+:root:not([data-theme="dark"]) .leaflet-tile-pane {
   filter: sepia(0.12) saturate(1.25) brightness(1.06) contrast(0.94);
 }
 
@@ -131,6 +142,22 @@ input:focus-visible {
   .wave-train path:nth-child(2) {
     opacity: var(--wave-strength);
   }
+}
+
+[data-theme="dark"] .leaflet-control-attribution {
+  color: rgb(var(--ink-rgb) / 0.7);
+  background: rgb(var(--paper-rgb) / 0.82);
+}
+
+[data-theme="dark"] .leaflet-control-attribution a {
+  color: var(--signal);
+}
+
+[data-theme="dark"] .leaflet-bar a,
+[data-theme="dark"] .leaflet-bar a:hover {
+  border-bottom-color: rgb(var(--ink-rgb) / 0.18);
+  background: var(--paper);
+  color: var(--ink);
 }
 
 /* No room for them beside the timeline, and pinching does the same job. */

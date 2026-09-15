@@ -1,5 +1,6 @@
 "use client";
 
+import { Moon, Sun } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BeachMap } from "@/components/beach-map";
 import { BeachPanel } from "@/components/beach-panel";
@@ -18,6 +19,7 @@ import {
 } from "@/lib/quality";
 import { ALL_COUNTRIES } from "@/lib/catalog";
 import { searchBeaches } from "@/lib/search";
+import { useTheme } from "@/hooks/use-theme";
 import { withinBounds } from "@/lib/viewport";
 import type { Beach, Bounds, ClassifiedQuality, Coordinates } from "@/lib/types";
 
@@ -38,6 +40,7 @@ export function SwimApp() {
   const [viewBounds, setViewBounds] = useState<Bounds | null>(null);
   const [resetViewSignal, setResetViewSignal] = useState(0);
   const sea = useSeaConditions(selectedBeach);
+  const [theme, toggleTheme] = useTheme();
 
   const seasons = useMemo(() => country?.seasons ?? [], [country]);
   const beaches = useMemo(() => country?.beaches ?? [], [country]);
@@ -172,8 +175,8 @@ export function SwimApp() {
         onLeaveFrame={leaveCountry}
       />
 
-      {/* Floating search */}
-      <div className="absolute top-3 left-1/2 z-[500] w-[min(92%,22rem)] -translate-x-1/2">
+      {/* Floating search, clear of the theme toggle on a phone */}
+      <div className="absolute top-3 left-1/2 z-[500] w-[min(92%,22rem)] -translate-x-1/2 max-sm:right-14 max-sm:left-2 max-sm:w-auto max-sm:translate-x-0">
         <input
           aria-label="Search for a beach"
           className="h-10 w-full border border-ink/25 bg-paper/95 px-3 text-sm shadow-lg outline-none backdrop-blur-sm transition focus:border-signal"
@@ -228,8 +231,22 @@ export function SwimApp() {
         )}
       </div>
 
+      <button
+        aria-label={theme === "dark" ? "Light map" : "Dark map"}
+        className="absolute top-3 right-2 z-[500] flex size-10 items-center justify-center rounded-full border border-ink/20 bg-paper/95 text-signal shadow transition hover:bg-paper"
+        onClick={toggleTheme}
+        title={theme === "dark" ? "Light map" : "Dark map"}
+        type="button"
+      >
+        {theme === "dark" ? (
+          <Sun aria-hidden="true" className="size-5" />
+        ) : (
+          <Moon aria-hidden="true" className="size-5" />
+        )}
+      </button>
+
       {/* The legend, always on, counting what the viewport holds */}
-      <div className="pointer-events-none absolute right-2 bottom-20 z-[500] rounded bg-paper/30 px-2 py-1.5 backdrop-blur-sm">
+      <div className="pointer-events-none absolute right-2 bottom-20 z-[500] rounded-lg border border-ink/20 bg-paper/95 px-2.5 py-1.5 shadow">
         <ul className="m-0 list-none p-0 text-xs">
           {LEGEND_ORDER.map((code) => {
             const count = counts.get(code) ?? 0;

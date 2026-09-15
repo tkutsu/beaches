@@ -7,10 +7,6 @@
 //     for the beach OSM links to, which is the right place by construction;
 //     failing that, the best free-licensed Commons photo taken nearby whose
 //     title or categories say it is a beach or a lake.
-//   * Eurostat and GISCO - nights spent in tourist accommodation per region,
-//     divided by the region's area, as a measure of how touristy it is.
-//   * EMODnet Bathymetry - how deep the sea is 500 m out, for how quickly the
-//     water gets deep off a coastal beach.
 //
 // Run by hand now and then, not on every build: OSM and Commons change slowly,
 // and the full run makes tens of thousands of requests. Responses are cached
@@ -34,13 +30,7 @@ const OVERPASS = [
   "https://overpass-api.de/api/interpreter",
 ];
 const COMMONS_API = "https://commons.wikimedia.org/w/api.php";
-const EMODNET_PROFILE = "https://rest.emodnet-bathymetry.eu/depth_profile";
 const WIKIDATA_API = "https://www.wikidata.org/w/api.php";
-const NUTS_BOUNDARIES =
-  "https://gisco-services.ec.europa.eu/distribution/v2/nuts/geojson/NUTS_RG_03M_2021_4326_LEVL_2.geojson";
-const TOURISM_NIGHTS =
-  "https://ec.europa.eu/eurostat/api/dissemination/statistics/1.0/data/tour_occ_nin2" +
-  "?format=JSON&lang=EN&unit=NR&nace_r2=I551-I553&c_resid=TOTAL&sinceTimePeriod=2018";
 
 /** Overpass is asked one 2x2 degree tile at a time: small enough never to time out. */
 const TILE_DEGREES = 2;
@@ -51,14 +41,6 @@ const CENTRE_MATCH_METERS = 300;
 const FACILITY_METERS = 400;
 const PHOTO_SEARCH_METERS = 500;
 const COMMONS_CONCURRENCY = 2;
-/** EMODnet starts refusing past a few profiles in flight. */
-const EMODNET_CONCURRENCY = 3;
-/**
- * How far out the depth is read. EMODnet's grid is about 115 m a cell, too
- * coarse for the first few metres off the sand, so the reading is the shelf a
- * swimmer is heading onto rather than the step at the waterline.
- */
-const DEPTH_OUT_METERS = 500;
 /** Queries in flight: three lanes on the first server, one on the second. */
 const OVERPASS_LANES = 4;
 
@@ -198,7 +180,6 @@ function politeClient() {
 }
 
 const commonsGet = politeClient();
-const emodnetGet = politeClient();
 
 function commonsJson(params, label) {
   return commonsGet(
@@ -231,141 +212,6 @@ async function loadCatalogue() {
     countries.push({ code, beaches: catalog.beaches });
   }
   return countries;
-}
-
-// --- Tourism ---------------------------------------------------------------
-
-function ringArea(ring) {
-  // Spherical excess of a lon/lat ring, in km².
-  let total = 0;
-  for (let i = 0; i < ring.length; i += 1) {
-    const [lon1, lat1] = ring[i];
-    const [lon2, lat2] = ring[(i + 1) % ring.length];
-    total +=
-      ((lon2 - lon1) * Math.PI) / 180 *
-      (2 + Math.sin((lat1 * Math.PI) / 180) + Math.sin((lat2 * Math.PI) / 180));
-  }
-  return (Math.abs(total) * 6371.0088 ** 2) / 2;
-}
-
-function insideRing(lon, lat, ring) {
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
-    const [xi, yi] = ring[i];
-    const [xj, yj] = ring[j];
-    if (yi > lat !== yj > lat && lon < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
-
-function metersToRing(lat, lon, ring) {
-  const scale = Math.cos((lat * Math.PI) / 180);
-  let best = Infinity;
-  for (let i = 0; i < ring.length - 1; i += 1) {
-    const ax = (ring[i][0] - lon) * scale;
-    const ay = ring[i][1] - lat;
-    const bx = (ring[i + 1][0] - lon) * scale;
-    const by = ring[i + 1][1] - lat;
-    const dx = bx - ax;
-    const dy = by - ay;
-    const length = dx * dx + dy * dy;
-    const t = length ? Math.max(0, Math.min(1, -(ax * dx + ay * dy) / length)) : 0;
-    best = Math.min(best, Math.hypot(ax + t * dx, ay + t * dy));
-  }
-  return (best * Math.PI * 6371000) / 180;
-}
-
-/** Reads a Eurostat JSON-stat response into { geo: { year, value } } for the latest year. */
-function latestByRegion(payload) {
-  const dims = payload.id;
-  const strides = dims.map((_, i) => payload.size.slice(i + 1).reduce((a, b) => a * b, 1));
-  const positions = Object.fromEntries(
-    dims.map((dim) => [
-      dim,
-      Object.fromEntries(
-        Object.entries(payload.dimension[dim].category.index).map(([code, pos]) => [pos, code]),
-      ),
-    ]),
-  );
-  const latest = {};
-  for (const [flat, value] of Object.entries(payload.value)) {
-    let rest = Number(flat);
-    const codes = {};
-    dims.forEach((dim, i) => {
-      codes[dim] = positions[dim][Math.floor(rest / strides[i])];
-      rest %= strides[i];
-    });
-    const year = Number(codes.time);
-    if (!latest[codes.geo] || latest[codes.geo].year < year) {
-      latest[codes.geo] = { year, value };
-    }
-  }
-  return latest;
-}
-
-async function loadRegions() {
-  console.log("Loading NUTS 2 regions and tourism nights…");
-  const [boundaries, nights] = await Promise.all([
-    cached("nuts2-boundaries.json", () => fetchJson(NUTS_BOUNDARIES, {}, { label: "GISCO" })),
-    cached("tourism-nights.json", () => fetchJson(TOURISM_NIGHTS, {}, { label: "Eurostat" })),
-  ]);
-  const latest = latestByRegion(nights);
-
-  const regions = boundaries.features.map((feature) => {
-    const polygons =
-      feature.geometry.type === "Polygon"
-        ? [feature.geometry.coordinates]
-        : feature.geometry.coordinates;
-    let west = 180, south = 90, east = -180, north = -90, area = 0;
-    for (const polygon of polygons) {
-      polygon.forEach((ring, index) => {
-        area += (index === 0 ? 1 : -1) * ringArea(ring);
-      });
-      for (const [lon, lat] of polygon[0]) {
-        west = Math.min(west, lon); east = Math.max(east, lon);
-        south = Math.min(south, lat); north = Math.max(north, lat);
-      }
-    }
-    const code = feature.properties.NUTS_ID;
-    const tourism = latest[code];
-    return {
-      code,
-      name: feature.properties.NAME_LATN,
-      polygons,
-      box: [west, south, east, north],
-      nights: tourism?.value ?? null,
-      year: tourism?.year ?? null,
-      density: tourism ? tourism.value / area : null,
-    };
-  });
-  console.log(`  ${regions.length} regions, ${Object.keys(latest).length} with tourism figures\n`);
-  return regions;
-}
-
-function regionFor(lat, lon, regions) {
-  for (const region of regions) {
-    const [west, south, east, north] = region.box;
-    if (lon < west || lon > east || lat < south || lat > north) continue;
-    for (const polygon of region.polygons) {
-      if (insideRing(lon, lat, polygon[0]) && !polygon.slice(1).some((hole) => insideRing(lon, lat, hole))) {
-        return region;
-      }
-    }
-  }
-  // Simplified coastlines leave some beaches just offshore: take the nearest
-  // region within 25 km instead.
-  let best = null;
-  for (const region of regions) {
-    const [west, south, east, north] = region.box;
-    if (lon < west - 0.3 || lon > east + 0.3 || lat < south - 0.3 || lat > north + 0.3) continue;
-    for (const polygon of region.polygons) {
-      const distance = metersToRing(lat, lon, polygon[0]);
-      if (distance < 25_000 && (!best || distance < best.distance)) best = { region, distance };
-    }
-  }
-  return best?.region ?? null;
 }
 
 // --- OpenStreetMap ---------------------------------------------------------
@@ -566,89 +412,6 @@ function matchOutlines(beaches, outlines) {
   return outlineOf;
 }
 
-// --- Depth -----------------------------------------------------------------
-
-/**
- * A straight depth profile through the beach, split into its two halves, each
- * running outwards from the beach. EMODnet reads only a line's two ends, so a
- * path with corners comes back flat; each direction pair costs a request.
- */
-async function profileThrough(beach, axis) {
-  const reach = (DEPTH_OUT_METERS * 2) / 111320;
-  const wide = reach / Math.cos((beach.lat * Math.PI) / 180);
-  const [from, to] =
-    axis === "NS"
-      ? [[beach.lon, beach.lat + reach], [beach.lon, beach.lat - reach]]
-      : [[beach.lon - wide, beach.lat], [beach.lon + wide, beach.lat]];
-  const geom = `LINESTRING(${from[0].toFixed(5)} ${from[1].toFixed(5)},${to[0].toFixed(5)} ${to[1].toFixed(5)})`;
-  const values = await emodnetGet(
-    `${EMODNET_PROFILE}?${new URLSearchParams({ geom })}`,
-    `EMODnet ${beach.id}`,
-  );
-  const middle = Math.floor(values.length / 2);
-  return [values.slice(0, middle).reverse(), values.slice(middle)];
-}
-
-/**
- * Metres of water 500 m out, in whichever direction from the beach is sea, or
- * null when the model shows none. A direction counts as sea when it is at
- * least 2 m deep a kilometre out; then its 500 m reading is kept however
- * shallow, because "barely waist deep 500 m out" is the answer a flat sandy
- * coast should get, not a blank. A beach runs along its shore, so when its
- * OSM outline is clearly longer one way, only the line across it is asked for.
- */
-async function depthOffshore(beach, outline) {
-  let axes = ["NS", "EW"];
-  if (outline?.box) {
-    const [south, west, north, east] = outline.box;
-    const tall = metersBetween(south, west, north, west);
-    const wide = metersBetween(south, west, south, east);
-    if (wide > tall * 1.5) axes = ["NS"];
-    else if (tall > wide * 1.5) axes = ["EW"];
-  }
-  let deepest = null;
-  for (const axis of axes) {
-    for (const side of await profileThrough(beach, axis)) {
-      // EMODnet gives height, so the sea is negative.
-      const farOut = -side[side.length - 1];
-      if (farOut < 2) continue;
-      const depth = Math.max(0, -side[Math.floor(side.length / 2)]);
-      if (deepest === null || depth > deepest) deepest = depth;
-    }
-  }
-  return deepest === null ? null : Math.round(deepest);
-}
-
-/** Depth readings for every coastal beach, one cache file per country. */
-async function measureDepths(countries, outlineOf) {
-  const all = {};
-  for (const { code, beaches } of countries) {
-    const cacheName = `emodnet/${code}.json`;
-    const known = await cached(cacheName, async () => ({}));
-    // The bathymetry is of the sea; lakes have none.
-    const pending = beaches.filter((beach) => !beach.lake && !(beach.id in known));
-    let sinceSave = 0;
-    await pool(pending, EMODNET_CONCURRENCY, async (beach) => {
-      try {
-        known[beach.id] = await depthOffshore(beach, outlineOf.get(beach.id));
-      } catch (error) {
-        console.warn(`  ${beach.id}: ${error.message}`);
-        return;
-      }
-      sinceSave += 1;
-      if (sinceSave >= 300) {
-        sinceSave = 0;
-        await writeFile(new URL(cacheName, CACHE_DIR), JSON.stringify(known));
-      }
-    });
-    await writeFile(new URL(cacheName, CACHE_DIR), JSON.stringify(known));
-    const measured = beaches.filter((beach) => known[beach.id] != null).length;
-    console.log(`  depth ${code}: ${pending.length} measured, ${measured} of ${beaches.length} with a reading`);
-    Object.assign(all, known);
-  }
-  return all;
-}
-
 // --- Photos ----------------------------------------------------------------
 
 function stripHtml(html = "") {
@@ -836,20 +599,6 @@ const countries = await loadCatalogue();
 const allBeaches = countries.flatMap(({ code, beaches }) => beaches.map((beach) => ({ ...beach, code })));
 console.log(`${allBeaches.length} beaches in ${countries.length} countries\n`);
 
-// Tourism: each beach's region, then tiers by quartile across all beaches.
-const regions = await loadRegions();
-const regionOf = new Map();
-for (const beach of allBeaches) {
-  const region = regionFor(beach.lat, beach.lon, regions);
-  if (region?.density != null) regionOf.set(beach.id, region);
-}
-const densities = [...regionOf.values()].map((region) => region.density).sort((a, b) => a - b);
-const quartile = (q) => densities[Math.floor((densities.length - 1) * q)];
-const cuts = [quartile(0.25), quartile(0.5), quartile(0.75)];
-const tierOf = (density) => 1 + cuts.filter((cut) => density > cut).length;
-console.log(`  ${regionOf.size} beaches placed in a region with tourism figures`);
-console.log(`  tier cuts (nights per km²): ${cuts.map((cut) => Math.round(cut)).join(", ")}\n`);
-
 // The Commons search does not depend on OpenStreetMap, so it runs alongside.
 console.log("Searching Commons for nearby photos, alongside OpenStreetMap…");
 const candidateSearch = searchAllCandidates(countries);
@@ -911,10 +660,6 @@ for (const beach of allBeaches) {
 }
 console.log(`  ${outlineOf.size} of ${allBeaches.length} beaches matched to an OSM beach outline\n`);
 
-// Depth needs the outlines but nothing after them, so it runs alongside.
-console.log("Measuring depth off coastal beaches, alongside the rest…");
-const depthSearch = measureDepths(countries, outlineOf);
-
 console.log("Fetching facilities around the matched outlines…");
 const facilities = new Grid(0.01);
 const seenFacilities = new Set();
@@ -951,8 +696,6 @@ for (const beach of allBeaches) {
   }
   const ordered = FACILITY_CODES.map(([code]) => code).filter((code) => codes.has(code)).join("");
   if (ordered) entry.f = ordered;
-  const region = regionOf.get(beach.id);
-  if (region) entry.r = region.code;
   details.set(beach.id, entry);
 }
 
@@ -998,16 +741,10 @@ for (const beach of allBeaches) {
 }
 console.log(`  ${curatedCount} photos of the right place, ${nearbyCount} nearby\n`);
 
-const depths = await depthSearch;
-for (const beach of allBeaches) {
-  if (depths[beach.id] != null) details.get(beach.id).d = depths[beach.id];
-}
-
 // One file per country.
 await mkdir(OUT_DIR, { recursive: true });
-const counts = { surface: 0, facilities: 0, photo: 0, region: 0, depth: 0 };
+const counts = { surface: 0, facilities: 0, photo: 0 };
 for (const { code, beaches } of countries) {
-  const fileRegions = {};
   const fileBeaches = {};
   for (const beach of beaches) {
     const entry = details.get(beach.id);
@@ -1016,22 +753,10 @@ for (const { code, beaches } of countries) {
     if (entry.s) counts.surface += 1;
     if (entry.f) counts.facilities += 1;
     if (entry.p) counts.photo += 1;
-    if (entry.d != null) counts.depth += 1;
-    if (entry.r) {
-      counts.region += 1;
-      const region = regionOf.get(beach.id);
-      fileRegions[region.code] = [
-        region.name,
-        Math.round(region.nights),
-        region.year,
-        Math.round(region.density),
-        tierOf(region.density),
-      ];
-    }
   }
   await writeFile(
     new URL(`${code}.json`, OUT_DIR),
-    JSON.stringify({ regions: fileRegions, beaches: fileBeaches }),
+    JSON.stringify({ beaches: fileBeaches }),
   );
 }
 const share = (count) => `${count} (${Math.round((count / allBeaches.length) * 100)}%)`;
@@ -1039,5 +764,3 @@ console.log("Wrote public/data/details");
 console.log(`  sand or pebbles known: ${share(counts.surface)}`);
 console.log(`  facilities nearby:     ${share(counts.facilities)}`);
 console.log(`  photo:                 ${share(counts.photo)}`);
-console.log(`  touristy tier:         ${share(counts.region)}`);
-console.log(`  depth offshore:        ${share(counts.depth)}`);

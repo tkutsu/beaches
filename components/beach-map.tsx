@@ -5,6 +5,7 @@ import type {
   CircleMarker,
   LayerGroup,
   Map as LeafletMap,
+  MaplibreGL,
   Marker,
   Renderer,
 } from "leaflet";
@@ -17,8 +18,10 @@ import {
   clusterRadius,
   type Cluster,
 } from "@/lib/cluster";
+import { BASEMAP_ATTRIBUTION, loadBasemapStyle } from "@/lib/basemap";
 import { DIVE_SECONDS, playBurst } from "@/lib/burst";
 import { QUALITY_COLORS, formatBeachName, qualityAt } from "@/lib/quality";
+import { useTheme } from "@/hooks/use-theme";
 import type { SeaConditions } from "@/hooks/use-sea-conditions";
 import { visibleShare } from "@/lib/viewport";
 import type { Beach, Bounds, Coordinates } from "@/lib/types";
@@ -85,6 +88,9 @@ export function BeachMap({
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<LeafletMap | null>(null);
   const leafletRef = useRef<typeof import("leaflet") | null>(null);
+  const basemapRef = useRef<MaplibreGL | null>(null);
+  const [theme] = useTheme();
+  const themeRef = useRef(theme);
   const markersByIdRef = useRef<Map<string, CircleMarker>>(new Map());
   const halosByIdRef = useRef<Map<string, CircleMarker>>(new Map());
   const haloRendererRef = useRef<Renderer | null>(null);
@@ -111,6 +117,23 @@ export function BeachMap({
     selectBeachRef.current = onSelectBeach;
   }, [onSelectBeach]);
 
+  // Swaps the basemap's style in place when the theme flips; the beaches and
+  // the view stay as they are.
+  useEffect(() => {
+    themeRef.current = theme;
+    const basemap = basemapRef.current;
+    if (!mapReady || !basemap) return;
+    let stale = false;
+    loadBasemapStyle(theme)
+      .then((style) => {
+        if (!stale) basemap.getMaplibreMap().setStyle(style);
+      })
+      .catch(() => {});
+    return () => {
+      stale = true;
+    };
+  }, [mapReady, theme]);
+
   useEffect(() => {
     viewportRef.current = onViewportChange;
   }, [onViewportChange]);
@@ -127,7 +150,11 @@ export function BeachMap({
     const halosById = halosByIdRef.current;
 
     const initialize = async () => {
-      const L = await import("leaflet");
+      const [L, { maplibreGL }, style] = await Promise.all([
+        import("leaflet"),
+        import("@maplibre/maplibre-gl-leaflet"),
+        loadBasemapStyle(themeRef.current).catch(() => null),
+      ]);
       if (cancelled || !containerRef.current) return;
 
       leafletRef.current = L;
@@ -144,11 +171,20 @@ export function BeachMap({
       });
 
       map.attributionControl.setPrefix(false);
-      L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
-        attribution:
-          '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
-        maxZoom: 18,
-      }).addTo(map);
+      // Plain OpenStreetMap tiles if the style cannot be fetched, rather than
+      // no map at all.
+      if (style) {
+        basemapRef.current = maplibreGL({
+          style,
+          // Stands in for the credit the style's own sources would add.
+          attributionControl: { customAttribution: BASEMAP_ATTRIBUTION },
+        }).addTo(map);
+      } else {
+        L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          attribution: BASEMAP_ATTRIBUTION,
+          maxZoom: 18,
+        }).addTo(map);
+      }
 
       // Its own pane, faded as a whole: neighbouring blobs overlap, and
       // per-shape transparency would darken every overlap.

@@ -4,14 +4,7 @@ import Image from "next/image";
 import { useMemo, useState } from "react";
 import { useBeachDetails } from "@/hooks/use-beach-details";
 import type { SeaConditions } from "@/hooks/use-sea-conditions";
-import {
-  FACILITY_LABELS,
-  TOURISM_LABELS,
-  commonsPage,
-  commonsThumbnail,
-  depthLabel,
-  formatNights,
-} from "@/lib/details";
+import { FACILITIES, commonsPage, commonsThumbnail } from "@/lib/details";
 import {
   NO_DATA_LABEL,
   QUALITY_COLORS,
@@ -41,14 +34,12 @@ export function BeachPanel({
 }: BeachPanelProps) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   const [brokenPhoto, setBrokenPhoto] = useState<string | null>(null);
-  const extra = useBeachDetails(beach);
-  const details = extra?.details;
-  const region = extra?.region ?? null;
+  const details = useBeachDetails(beach);
   // A file can be deleted from Commons after the sync; then the card simply
   // goes back to having no photo.
   const photo = details?.p && details.p[0] !== brokenPhoto ? details.p : null;
   const facilities = [...(details?.f ?? "")]
-    .map((code) => FACILITY_LABELS[code])
+    .map((code) => FACILITIES[code])
     .filter(Boolean);
   const surface = details?.s
     ? details.s[0].toUpperCase() + details.s.slice(1)
@@ -68,8 +59,6 @@ export function BeachPanel({
 
   const stripSeasons = seasons.slice(firstAssessed);
   const stripQualities = history.slice(firstAssessed);
-  const excellentCount = stripQualities.filter((q) => q === 1).length;
-  const assessedCount = stripQualities.filter((q) => q !== null).length;
   const activeQuality =
     activeSeason === undefined ? null : history[seasons.indexOf(activeSeason)];
   const hovered = hoveredIndex === null ? null : {
@@ -109,9 +98,37 @@ export function BeachPanel({
           </h2>
           <p className="m-0 mt-0.5 text-xs text-ink/55">
             {beach.lake ? "Lake" : "Coast"}
-            {surface && ` · ${surface}`} · {assessedCount} seasons monitored ·
-            Excellent in {excellentCount}
+            {surface && ` · ${surface}`}
           </p>
+          {/* The class is a verdict on last summer; this is the water today. */}
+          {sea && (
+            <p className="m-0 mt-1 flex flex-wrap items-baseline gap-x-3 text-xs text-ink/65">
+              {sea.temperature !== null && (
+                <span>
+                  Sea{" "}
+                  <span className="font-semibold text-ink tabular-nums">
+                    {sea.temperature.toFixed(1)} °C
+                  </span>
+                </span>
+              )}
+              {sea.waveHeight !== null && (
+                <span>
+                  Waves{" "}
+                  <span className="font-semibold text-ink tabular-nums">
+                    {sea.waveHeight.toFixed(1)} m
+                  </span>
+                </span>
+              )}
+              <a
+                className="text-ink/45 hover:underline"
+                href="https://open-meteo.com/"
+                rel="noreferrer"
+                target="_blank"
+              >
+                now, via Open-Meteo
+              </a>
+            </p>
+          )}
         </div>
         <button
           aria-label="Close"
@@ -122,6 +139,23 @@ export function BeachPanel({
           ×
         </button>
       </div>
+
+      {facilities.length > 0 && (
+        <ul
+          aria-label="Within a short walk"
+          className="m-0 mt-3 flex list-none flex-wrap gap-1.5 p-0"
+        >
+          {facilities.map(({ label, Icon }) => (
+            <li
+              className="flex size-7 items-center justify-center rounded-full bg-ink/6 text-ink/70"
+              key={label}
+              title={label}
+            >
+              <Icon aria-label={label} className="size-4" role="img" />
+            </li>
+          ))}
+        </ul>
+      )}
 
       <p className="m-0 mt-2 flex items-center gap-2 text-sm font-semibold">
         <span
@@ -143,69 +177,6 @@ export function BeachPanel({
           </span>
         )}
       </p>
-
-      {/* The class is a verdict on last summer; this is the water today. */}
-      {sea && (
-        <p className="m-0 mt-1.5 flex flex-wrap items-baseline gap-x-3 text-xs text-ink/65">
-          {sea.temperature !== null && (
-            <span>
-              Sea{" "}
-              <span className="font-semibold text-ink tabular-nums">
-                {sea.temperature.toFixed(1)} °C
-              </span>
-            </span>
-          )}
-          {sea.waveHeight !== null && (
-            <span>
-              Waves{" "}
-              <span className="font-semibold text-ink tabular-nums">
-                {sea.waveHeight.toFixed(1)} m
-              </span>
-            </span>
-          )}
-          <a
-            className="text-ink/45 hover:underline"
-            href="https://open-meteo.com/"
-            rel="noreferrer"
-            target="_blank"
-          >
-            now, via Open-Meteo
-          </a>
-        </p>
-      )}
-
-      {(region || details?.d != null || facilities.length > 0) && (
-        <ul className="m-0 mt-2 flex list-none flex-wrap gap-1.5 p-0 text-[11px]">
-          {region && (
-            <li
-              className="rounded-full bg-signal/10 px-2 py-0.5 text-signal"
-              title={`${formatNights(region[1])} tourist nights in ${region[0]} in ${region[2]}`}
-            >
-              {TOURISM_LABELS[region[4]]}
-            </li>
-          )}
-          {details?.d != null && (
-            <li
-              className="rounded-full bg-signal/10 px-2 py-0.5 text-signal"
-              title={
-                details.d < 1
-                  ? "Under 1 m deep 500 m out"
-                  : `About ${details.d} m deep 500 m out`
-              }
-            >
-              {depthLabel(details.d)}
-            </li>
-          )}
-          {facilities.map((label) => (
-            <li
-              className="rounded-full bg-ink/6 px-2 py-0.5 text-ink/70"
-              key={label}
-            >
-              {label}
-            </li>
-          ))}
-        </ul>
-      )}
 
       <div className="mt-3" onMouseLeave={() => setHoveredIndex(null)}>
         <div
@@ -263,18 +234,11 @@ export function BeachPanel({
         >
           Open in maps ↗
         </a>
-        {details && (
-          // Commons licences ask for the author and licence; the rest is
-          // OpenStreetMap and Eurostat.
+        {photo && (
+          // Commons licences ask for the author and licence on the page; the
+          // other sources are credited in the map's corner.
           <p className="m-0 min-w-0 truncate text-right text-[10px] text-ink/40">
-            {[
-              photo && `Photo: ${photo[1]}, ${photo[2]}`,
-              (details.s || details.f) && "OpenStreetMap",
-              region && "Eurostat",
-              details.d != null && "EMODnet",
-            ]
-              .filter(Boolean)
-              .join(" · ")}
+            Photo: {photo[1]}, {photo[2]}
           </p>
         )}
       </div>
